@@ -1,0 +1,5 @@
+{
+  "name": "cc-theme",
+  "owner": { "name": "cavalier0" },
+  "plugins": [{ "name": "cavalier0-theme", "source": "./" }]
+}
