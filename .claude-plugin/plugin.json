@@ -1,6 +1,6 @@
 {
   "name": "cavalier0-theme",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "A calm dark theme tinted by where the session runs (local, cloud, worktree), plus a cockpit pane: usage with pace forecast, live subagents and the plan.",
   "types": "./types/index.d.ts"
 }

@@ -18,7 +18,7 @@ const NOW = Date.UTC(2029, 11, 31, 20)
 
 const engine = (
   on: On,
-  opts: { remote?: boolean; cwd?: string; repoRoot?: string | null; files?: Record<string, string>; firstPrompt?: string } = {},
+  opts: { remote?: boolean; cwd?: string; repoRoot?: string | null; files?: Record<string, string>; firstPrompt?: string; env?: Record<string, string> } = {},
 ) => {
   const k = (p: string) => p.replace(/\\/g, '/')
   on('session.messages', () => ({
@@ -42,7 +42,8 @@ const engine = (
   on('clock.sleep', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'me-session' }))
   const themes: unknown[] = []
-  const opened: unknown[] = []
+  const opened: { id: string }[] = []
+  const panes: string[] = []
   const store = new Map<string, unknown>()
   const logs: string[] = []
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
@@ -56,7 +57,9 @@ const engine = (
   })
   on('clock.now', () => ({ value: NOW }))
   on('clock.every', () => ({ value: undefined }))
-  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:\\Users\\me' : e.name === 'CLAUDE_CODE_REMOTE' && opts.remote ? 'true' : undefined }))
+  on('env.get', (_, e) => ({
+    value: opts.env?.[e.name] ?? (e.name === 'USERPROFILE' ? 'C:\\Users\\me' : e.name === 'CLAUDE_CODE_REMOTE' && opts.remote ? 'true' : undefined),
+  }))
   on('session.info', () => ({ value: { transcriptPath: '', platform: 'windows', isHosted: false } }))
   on('session.cwd', () => ({ value: opts.cwd ?? 'C:/code/app' }))
   on('session.repo', () => ({
@@ -82,12 +85,13 @@ const engine = (
   on('tool.register', () => ({ value: { tool: 'mcp__cavalier0-theme__step' } }))
   on('ui.open', (_, e) => {
     opened.push(e)
+    if (!panes.includes(e.id)) panes.push(e.id)
     return { value: { isPlaced: true } }
   })
   on('agent.list', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: {} }))
-  return { themes, opened, logs, files }
+  return { themes, opened, logs, files, panes }
 }
 
 test('a cloud session gets the violet look and the widget shows CLOUD', async ($, on) => {
@@ -278,4 +282,79 @@ test('sections can be reordered in settings', async ($, on) => {
   await ui.press({ key: 'down-sessions' })
   expect(JSON.parse(files.get(`${ROOT}/prefs.json`) ?? '{}').order).toEqual(['usage', 'sessions', 'agents', 'plan'])
   await ui.unmount()
+})
+
+test('the band shows sessions and usage, and its button toggles the cockpit', async ($, on) => {
+  const { panes } = engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({}) } })
+  on('ui.panes', () => ({ value: panes.map(id => ({ id })) as never }))
+  on('ui.close', (_, e) => {
+    panes.splice(panes.indexOf(e.id), 1)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'cavalier0-theme', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+  expect(await band.find({ type: 'Text', text: '1 waiting on you' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '5h 42%' })).toBeDefined()
+  expect(panes).toEqual(['cockpit'])
+  await band.press({ key: 'cockpit-toggle' })
+  expect(panes).toEqual([])
+  await band.press({ key: 'cockpit-toggle' })
+  expect(panes).toEqual(['cockpit'])
+  await band.unmount()
+})
+
+test('the band can be switched off in settings', async ($, on) => {
+  engine(on, { files: { [`${ROOT}/prefs.json`]: JSON.stringify({ band: false }) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'cavalier0-theme', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+  expect(await band.find({ type: 'Button', key: 'cockpit-toggle' } as never)).toBeUndefined()
+  await band.unmount()
+})
+
+const HOST_ENV = {
+  CLAUDE_CODE_HOST_SESSION_ID: 'local_me',
+  CLAUDE_CODE_EXECPATH: 'C:/Data/claude_x/claude-code/2.1/claude.exe',
+  CLAUDE_CODE_ACCOUNT_UUID: 'acc',
+  CLAUDE_CODE_ORGANIZATION_UUID: 'org',
+}
+const RECORD = 'C:/Data/claude_x/claude-code-sessions/acc/org/local_me.json'
+const record = (over: Record<string, unknown>) =>
+  JSON.stringify({ sessionId: 'local_me', lastFocusedAt: 1, isArchived: false, title: 'Custom "theme" mod', ...over })
+
+test("a session is named as the app's sidebar names it", async ($, on) => {
+  const { files } = engine(on, { env: HOST_ENV, files: { [RECORD]: record({}) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const mine = JSON.parse(files.get(`${ROOT}/beats/slot-0.json`) ?? '{}')
+  expect(mine.label).toBe('Custom "theme" mod')
+  expect(mine.hostId).toBe('local_me')
+})
+
+test('an archived session leaves the list', async ($, on) => {
+  const { files } = engine(on, { env: HOST_ENV, files: { [RECORD]: record({ isArchived: true }) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(JSON.parse(files.get(`${ROOT}/beats/slot-0.json`) ?? '{}').status).toBe('ended')
+})
+
+test('a session in two slots is listed once, by its newest beat', async ($, on) => {
+  engine(on, {
+    files: {
+      [`${ROOT}/beats/slot-0.json`]: beat({ label: 'Old copy', at: NOW - 20_000 }),
+      [`${ROOT}/beats/slot-1.json`]: beat({ label: 'New copy', at: NOW - 2_000 }),
+    },
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock.find({ type: 'Text', text: 'New copy' })).toBeDefined()
+  expect(await dock.find({ type: 'Text', text: 'Old copy' })).toBeUndefined()
+  await dock.unmount()
+})
+
+test('a long title is cut to the pane, so the dismiss button stays in view', async ($, on) => {
+  engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({ label: 'x'.repeat(200) }) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const title = await dock.find({ type: 'Text', text: /^x+…$/ })
+  expect((title?.text ?? '').length).toBeLessThanOrEqual(PANE.props.bodyColumns)
+  expect(await dock.find({ type: 'Button', key: 'hide-other' } as never)).toBeDefined()
+  await dock.unmount()
 })

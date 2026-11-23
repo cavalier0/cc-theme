@@ -14,6 +14,8 @@ export type Prefs = {
   folded: string[]
   /** The cockpit's sections, top to bottom. */
   order: string[]
+  /** The one-line band above the prompt. */
+  band: boolean
 }
 
 export type Window = {
@@ -66,6 +68,8 @@ export type Beat = {
   id: string
   /** The desktop app's own id for the session (`local_…`), which a deep link opens. */
   hostId?: string
+  /** The session's name as the desktop app's sidebar shows it. */
+  title?: string
   kind: EnvKind
   detail: string
   /** What the session is about: its plan's current step, else its first prompt. */

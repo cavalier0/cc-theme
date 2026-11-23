@@ -34,7 +34,7 @@ export const SECTIONS: { id: string; title: string }[] = [
   { id: 'plan', title: 'Plan' },
 ]
 
-export const defaultPrefs = (): Prefs => ({ colors: { ...DEFAULT_COLORS }, sound: true, backdrop: true, folded: [], order: SECTIONS.map(s => s.id) })
+export const defaultPrefs = (): Prefs => ({ colors: { ...DEFAULT_COLORS }, sound: true, backdrop: true, folded: [], order: SECTIONS.map(s => s.id), band: true })
 
 /** A stored order with any section it lacks added at the end, and any it no longer knows dropped. */
 export const orderOf = (stored: unknown): string[] => {

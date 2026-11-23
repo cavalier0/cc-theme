@@ -10,6 +10,7 @@ A Claude Code mod for the desktop and mobile apps: one calm dark theme, tinted b
   - **Usage:** 5-hour and weekly limits with reset countdowns and a pace forecast ("at this pace: full in 1h20, before it resets"), context fill, and the session's estimated cost at API prices.
   - **Agents:** each subagent's task, what it is doing right now, steps done, model, elapsed time, tokens and cost.
   - **Plan:** the session's plan steps with their state and how long each took.
+- **Band above the prompt.** One line in every session: a dot per live session, how many are waiting on you, 5-hour / weekly / context usage, and a Cockpit button that opens or closes the pane. "Toggle cockpit" is in the right-click menu too. Switch the band off in Settings.
 - **Transcript cards.** Shell output as a folded terminal card; markdown tables in replies as cards.
 - **Extras, each switchable in Settings:** a slow drifting backdrop tinted by environment, and soft sound cues (desktop app, once the speaker in the title bar is on; needs Claude Code 2.1.330 or later).
 

@@ -4,7 +4,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import type { AgentRun, Beat, EnvInfo, EnvKind, Plan, PlanStep, Prefs, SessionStatus, UsageSnap } from '../types'
 import { DEFAULT_COLORS, ENV_LABEL, PRESETS, SCENE, SECTIONS, defaultPrefs, isHex, lookFor, sceneSvg } from './look'
 import { SHELLS, replyWithTables, segmentsOf, shellCard, shellOutOf } from './cards'
-import { hideSession, liveBeats, prefsStamp, publishBeat, readBeats, readHidden, readPrefs, readSamples, writePrefs, writeSamples } from './shared'
+import { hideSession, liveBeats, readHostRecord, prefsStamp, publishBeat, readBeats, readHidden, readPrefs, readSamples, writePrefs, writeSamples } from './shared'
 import { addSample, dur, tokens, windowsOf } from './usage'
 
 type $ = EngineInterface
@@ -18,7 +18,7 @@ const STEP_BRIEF =
   `\n\n(Progress: as you work, call ${STEP_TOOL} with done/total steps and a short note so the person can follow along. Optional and silent.)`
 
 const envA = atom({ plugin: 'cavalier0-theme', key: 'env' } as const, null, { shape: 'env-1' })
-const prefsA = atom({ plugin: 'cavalier0-theme', key: 'prefs' } as const, null, { shape: 'prefs-2' })
+const prefsA = atom({ plugin: 'cavalier0-theme', key: 'prefs' } as const, null, { shape: 'prefs-3' })
 const usageA = atom({ plugin: 'cavalier0-theme', key: 'usage' } as const, null, { shape: 'usage-1' })
 const agentsA = atom({ plugin: 'cavalier0-theme', key: 'agents' } as const, [], { shape: 'agents-1' })
 const planA = atom({ plugin: 'cavalier0-theme', key: 'plan' } as const, null, { shape: 'plan-1' })
@@ -83,8 +83,9 @@ const applyLook = async ($: $) => {
   const unpainted = problems.find(l => l.startsWith("Desktop won't paint"))
   if (unpainted) $.ui.log(`cavalier0-theme: ${unpainted}`)
   try {
-    const set = await $.theme.set(args)
-    if (!set.isDrawn) $.ui.log(`cavalier0-theme: theme not drawn here (${set.reason})`)
+    // Not drawn yet is normal: a session starts before the app's window attaches, and the
+    // theme stands and draws once it does. Nothing to tell the person.
+    await $.theme.set(args)
   } catch (err) {
     // A build that does not take `sound` yet: set the look again without it, quietly.
     const { args: plain } = lookFor(env.kind, prefs, false)
@@ -158,6 +159,16 @@ async function openSession($: $, hostId: string) {
 }
 const SEEN_GRACE_MS = 3000
 
+/** The desktop app's record of this session, re-read every 15 seconds. */
+const host: { at: number; title?: string; isArchived: boolean; focusedAt?: number } = { at: 0, isArchived: false }
+
+/** A first prompt as a label: without the tags the app wraps around it, and not a resumed session's summary. */
+const promptLabel = (text: string): string | undefined => {
+  const plain = text.replace(/<([a-z-]+)[^>]*>[\s\S]*?<\/\1>/gi, ' ').replace(/\s+/g, ' ').trim()
+  if (!plain || plain.startsWith('<') || plain.startsWith('This session is being continued')) return undefined
+  return plain
+}
+
 let lastBeat = ''
 let lastBeatAt = 0
 
@@ -173,14 +184,25 @@ const pulse = async ($: $) => {
   const steps = plan?.steps ?? []
   const current = steps.find(s => s.status === 'in_progress')
   const id = await $.session.id()
-  const host = await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')
+  const hostId = await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')
+  const isHosted = !!hostId && HOST_ID.test(hostId)
+  if (isHosted && at - host.at > 15_000) {
+    const rec = await readHostRecord($, hostId)
+    Object.assign(host, { at, title: rec?.title, isArchived: rec?.isArchived ?? false, focusedAt: rec?.lastFocusedAt })
+  }
+  // You switched to this session since it finished: it is no longer waiting on you.
+  if (me.status === 'waiting' && host.focusedAt !== undefined && host.focusedAt >= me.since) {
+    await setStatus($, 'seen')
+    return pulse($)
+  }
   const beat: Beat = {
     id,
-    ...(host && HOST_ID.test(host) ? { hostId: host } : {}),
+    ...(isHosted ? { hostId } : {}),
+    ...(host.title ? { title: host.title } : {}),
     kind: env.kind,
     detail: env.detail,
-    label: clip(current?.content ?? me.firstPrompt ?? 'New session', 80),
-    status: me.status,
+    label: clip(host.title ?? current?.content ?? me.firstPrompt ?? 'New session', 80),
+    status: host.isArchived ? 'ended' : me.status,
     since: me.since,
     startedAt: me.startedAt,
     stepsDone: steps.filter(s => s.status === 'completed').length,
@@ -267,6 +289,13 @@ const syncAgents = async ($: $) => {
   )
 }
 
+/** Opens the cockpit full size, or closes it when it is up. */
+async function toggleCockpit($: $) {
+  const isUp = (await $.ui.panes()).some(p => p.id === PANE)
+  if (isUp) await $.ui.close({ id: PANE })
+  else await $.ui.open({ id: PANE, title: TITLE })
+}
+
 const expand = async ($: $) => {
   await $.ui.open({ id: PANE, title: TITLE }).catch(() => undefined)
 }
@@ -349,8 +378,8 @@ export const register: Register = on => {
     if (!(await read($, meA))?.firstPrompt) {
       const first = (await $.session.messages().catch(() => []))
         .filter(m => m.role === 'user')
-        .map(m => m.text.replace(/\s+/g, ' ').trim())
-        .find(text => text !== '' && !text.startsWith('<'))
+        .map(m => promptLabel(m.text))
+        .find(text => text !== undefined)
       if (first) await update($, meA, m => (m ? { ...m, firstPrompt: clip(first, 80) } : m))
     }
     await pulse($).catch(() => undefined)
@@ -469,7 +498,7 @@ export const register: Register = on => {
 
   // ---- this session's status, for mission control
   on('prompt.submit', async ($, e, next) => {
-    const text = e.text.replace(/\s+/g, ' ').trim()
+    const text = promptLabel(e.text)
     if (text && !e.isMeta) await update($, meA, m => (m && !m.firstPrompt ? { ...m, firstPrompt: clip(text, 80) } : m))
     return next(e)
   })
@@ -537,6 +566,52 @@ export const register: Register = on => {
     const segments = segmentsOf(e.props.text)
     if (!segments) return next(e)
     return replyWithTables($.ui.resolve(e), await accentOf($), segments)
+  })
+
+  // ---- the band above the prompt: sessions at a glance, usage, and the cockpit's toggle
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const prefs = (await read($, prefsA)) ?? defaultPrefs()
+    if (e.props.hasSurvey || !prefs.band) return next(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const hidden = await read($, hiddenA)
+    const sessions = (await read($, sessionsA)).filter(b => !(hidden[b.id] !== undefined && b.since <= hidden[b.id]!))
+    const usage = await read($, usageA)
+    const meId = (await read($, meA)) ? await $.session.id() : ''
+    const waiting = sessions.filter(b => b.id !== meId && (b.status === 'asking' || b.status === 'waiting'))
+    const tone = (pct: number | undefined) => (pct === undefined ? undefined : pct >= 90 ? 'error' : pct >= 75 ? 'warning' : undefined)
+    const pct = (w: UsageSnap['fiveHour']) => (w ? `${Math.round(w.percent)}%` : '–')
+    return (
+      <Box flexDirection="row" gap={1} alignItems="center">
+        <Box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} alignItems="center">
+          {sessions.length > 1
+            ? sessions.map(b => (
+                <Text key={`bd-${b.id}`} color={prefs.colors[b.kind] ?? DEFAULT_COLORS[b.kind]}>
+                  {b.id !== meId && (b.status === 'asking' || b.status === 'waiting') ? '◉' : b.status === 'working' ? '●' : '○'}
+                </Text>
+              ))
+            : null}
+          {waiting.length > 0 ? <Text color="warning">{`${waiting.length} waiting on you`}</Text> : null}
+          <Text dimColor>·</Text>
+          <Text dimColor={!tone(usage?.fiveHour?.percent)} color={tone(usage?.fiveHour?.percent)}>{`5h ${pct(usage?.fiveHour)}`}</Text>
+          <Text dimColor={!tone(usage?.week?.percent)} color={tone(usage?.week?.percent)}>{`wk ${pct(usage?.week)}`}</Text>
+          {usage?.contextPercent !== undefined ? (
+            <Text dimColor={!tone(usage.contextPercent)} color={tone(usage.contextPercent)}>{`ctx ${Math.round(usage.contextPercent)}%`}</Text>
+          ) : null}
+        </Box>
+        <Button key="cockpit-toggle" label="Cockpit" onPress={() => void toggleCockpit($)} />
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'ContextMenu' }, ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Button key="toggle-cockpit" onPress={() => void toggleCockpit($)}>
+          Toggle cockpit <Text dimColor>Usage, sessions, agents, plan</Text>
+        </Button>
+      </Box>
+    )
   })
 
   // ---- backdrop
@@ -648,17 +723,20 @@ export const register: Register = on => {
         b.contextPercent !== undefined ? `ctx ${Math.round(b.contextPercent)}%` : '',
         b.costUsd !== undefined ? `~$${b.costUsd.toFixed(2)}` : '',
       ].filter(Boolean)
+      const room = Math.max(12, (e.props.bodyColumns ?? 40) - 8)
       const title = (
-        <Text bold={!isMe || needsYou(b)} wrap="truncate">
-          {isMe ? `${b.label}  (this session)` : b.label}
+        <Text bold={!isMe || needsYou(b)} wrap="truncate-end">
+          {clip(isMe ? `${b.label} (this session)` : b.label, room)}
         </Text>
       )
       const hostId = b.hostId
       const live = sessions.map(x => x.id)
       return (
-        <Box key={`s-${b.id}`} flexDirection="row" gap={1}>
-          <Text color={colorOfKind(b.kind)}>{needsYou(b) && !isMe ? '◉' : '▌'}</Text>
-          <Box flexDirection="column" flexShrink={1} flexGrow={1}>
+        <Box key={`s-${b.id}`} flexDirection="row" gap={1} width="100%">
+          <Box flexShrink={0}>
+            <Text color={colorOfKind(b.kind)}>{needsYou(b) && !isMe ? '◉' : '▌'}</Text>
+          </Box>
+          <Box flexDirection="column" flexShrink={1} flexGrow={1} minWidth={0} overflow="hidden">
             {!isMe && hostId ? (
               <Button key={`go-${b.id}`} plain onPress={() => void openSession($, hostId)}>
                 {title}
@@ -669,10 +747,11 @@ export const register: Register = on => {
             <Text size="footnote" color={st.color} dimColor={st.dim}>
               {`${ENV_LABEL[b.kind].toLowerCase()} · ${st.text}`}
             </Text>
-            <Text size="footnote" dimColor wrap="truncate">
-              {facts.join(' · ')}
+            <Text size="footnote" dimColor wrap="truncate-end">
+              {clip(facts.join(' · '), room + 6)}
             </Text>
           </Box>
+          <Box flexShrink={0}>
           <Button
             key={`hide-${b.id}`}
             plain
@@ -685,6 +764,7 @@ export const register: Register = on => {
               })()
             }
           />
+          </Box>
         </Box>
       )
     }
@@ -777,6 +857,7 @@ export const register: Register = on => {
                 })()
               }
             />
+            <Button key="band" label={`Band: ${prefs.band ? 'on' : 'off'}`} onPress={() => void savePrefs($, p => ({ ...p, band: !p.band }))} />
             <Button
               key="reset"
               label="Reset colours"

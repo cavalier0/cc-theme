@@ -48,6 +48,7 @@ export const normalPrefs = (stored: Partial<Prefs> | undefined): Prefs => {
     backdrop: stored?.backdrop ?? d.backdrop,
     folded: Array.isArray(stored?.folded) ? stored.folded : [],
     order: orderOf(stored?.order),
+    band: stored?.band ?? d.band,
   }
 }
 
@@ -78,6 +79,38 @@ export async function readSamples($: $): Promise<Sample[]> {
 }
 export async function writeSamples($: $, s: Sample[]) {
   return writeJson($, `${await rootOf($)}/samples.json`, s)
+}
+
+// ---------------------------------------------------------------- the desktop app's record of this session
+
+export type HostRecord = { title?: string; isArchived: boolean; lastFocusedAt?: number }
+
+/**
+ * Reads the desktop app's own record of this session: its sidebar title, whether it is
+ * archived, and when you last had it open. Only the head of the file is read, where the
+ * app writes those fields. Undefined outside the desktop app or if the app moves it.
+ */
+export async function readHostRecord($: $, hostId: string): Promise<HostRecord | undefined> {
+  const exec = await $.env.get('CLAUDE_CODE_EXECPATH')
+  const account = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
+  const org = await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID')
+  if (!exec || !account || !org) return undefined
+  const norm = exec.replace(/\\/g, '/')
+  const at = norm.toLowerCase().lastIndexOf('/claude-code/')
+  if (at < 0) return undefined
+  const path = `${norm.slice(0, at)}/claude-code-sessions/${account}/${org}/${hostId}.json`
+  try {
+    const head = String(await $.fs.read(path, { offset: 0, length: 4096 }))
+    const title = /"title":"((?:[^"\\]|\\.)*)"/.exec(head)?.[1]
+    const focused = /"lastFocusedAt":(\d+)/.exec(head)?.[1]
+    return {
+      title: title ? (JSON.parse(`"${title}"`) as string) : undefined,
+      isArchived: /"isArchived":true/.test(head),
+      lastFocusedAt: focused ? Number(focused) : undefined,
+    }
+  } catch {
+    return undefined
+  }
 }
 
 // ---------------------------------------------------------------- hidden sessions
@@ -129,5 +162,13 @@ export async function publishBeat($: $, beat: Beat, slot: number): Promise<numbe
   return -1
 }
 
-export const liveBeats = (beats: (Beat | undefined)[], now: number): Beat[] =>
-  beats.filter((b): b is Beat => !!b && b.status !== 'ended' && now - b.at <= STALE_MS).sort((a, b) => a.startedAt - b.startedAt)
+/** The live sessions, one row each: a session seen in two slots keeps its newest beat. */
+export const liveBeats = (beats: (Beat | undefined)[], now: number): Beat[] => {
+  const byId = new Map<string, Beat>()
+  for (const b of beats) {
+    if (!b || now - b.at > STALE_MS) continue
+    const had = byId.get(b.id)
+    if (!had || b.at > had.at) byId.set(b.id, b)
+  }
+  return [...byId.values()].filter(b => b.status !== 'ended').sort((a, b) => a.startedAt - b.startedAt)
+}
