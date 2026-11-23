@@ -138,6 +138,14 @@ const setStatus = async ($: $, status: SessionStatus) => {
   await update($, meA, m => (m?.status === status ? m : { slot: -1, startedAt: at, ...m, status, since: at }))
 }
 
+/**
+ * When this session's reply was last drawn on screen. A drawing may not write state,
+ * so the render hook notes it here and the heartbeat acts on it. A turn that ends while
+ * you watch is drawn just before it completes: the grace covers that.
+ */
+const seen = { at: 0 }
+const SEEN_GRACE_MS = 3000
+
 let lastBeat = ''
 let lastBeatAt = 0
 
@@ -321,6 +329,14 @@ export const register: Register = on => {
     const startedAt = (await $.session.usage().catch(() => undefined))?.startedAt || (await $.clock.now())
     const kept = await read($, meA)
     if (!kept) await update($, meA, () => ({ status: 'starting' as const, since: startedAt, startedAt, slot: -1 }))
+    // A session resumed or already open before the mod loaded: label it by its first prompt.
+    if (!(await read($, meA))?.firstPrompt) {
+      const first = (await $.session.messages().catch(() => []))
+        .filter(m => m.role === 'user')
+        .map(m => m.text.replace(/\s+/g, ' ').trim())
+        .find(text => text !== '' && !text.startsWith('<'))
+      if (first) await update($, meA, m => (m ? { ...m, firstPrompt: clip(first, 80) } : m))
+    }
     await pulse($).catch(() => undefined)
 
     // A light heartbeat: clocks for running agents every second, usage every minute.
@@ -334,6 +350,12 @@ export const register: Register = on => {
         if (running || ticks % 30 === 0) await update($, nowA, () => t)
         if (running && ticks % 2 === 0) await syncAgents($)
         if (ticks % 60 === 0) await refreshUsage($).catch(() => undefined)
+        // You opened this session and its reply was on screen: it is no longer waiting on you.
+        const me = await read($, meA)
+        if (me?.status === 'waiting' && seen.at >= me.since - SEEN_GRACE_MS) {
+          await setStatus($, 'seen')
+          await pulse($).catch(() => undefined)
+        }
         if (ticks % 5 === 0) {
           await pulse($).catch(() => undefined)
           await followPrefs($).catch(() => undefined)
@@ -494,6 +516,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    if (e.props.onScreen) seen.at = await $.clock.now()
     if (e.surface !== 'desktop' && e.surface !== 'mobile') return next(e)
     const segments = segmentsOf(e.props.text)
     if (!segments) return next(e)
@@ -577,6 +600,8 @@ export const register: Register = on => {
           return { text: `needs an answer · ${ago}`, color: 'warning' }
         case 'waiting':
           return { text: `your move · ${ago}`, color: 'warning' }
+        case 'seen':
+          return { text: `read · ${ago}`, dim: true }
         case 'working':
           return { text: `working · ${ago}`, color: colorOfKind(b.kind) }
         default:

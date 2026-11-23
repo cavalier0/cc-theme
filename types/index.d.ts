@@ -56,7 +56,8 @@ export type PlanStep = { content: string; status: 'pending' | 'in_progress' | 'c
 
 export type Plan = { steps: PlanStep[]; updatedAt: number }
 
-export type SessionStatus = 'starting' | 'working' | 'asking' | 'waiting' | 'ended'
+/** `seen`: the turn ended and you have looked at the reply since, but not answered. */
+export type SessionStatus = 'starting' | 'working' | 'asking' | 'waiting' | 'seen' | 'ended'
 
 /** One live session's heartbeat, shared with every other session on this machine. */
 export type Beat = {

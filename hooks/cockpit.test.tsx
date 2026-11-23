@@ -16,8 +16,14 @@ const RESET = new Date(Date.UTC(2030, 0, 1)).toISOString()
 /** Stands in for the engine beneath the mod. */
 const NOW = Date.UTC(2029, 11, 31, 20)
 
-const engine = (on: On, opts: { remote?: boolean; cwd?: string; repoRoot?: string | null; files?: Record<string, string> } = {}) => {
+const engine = (
+  on: On,
+  opts: { remote?: boolean; cwd?: string; repoRoot?: string | null; files?: Record<string, string>; firstPrompt?: string } = {},
+) => {
   const k = (p: string) => p.replace(/\\/g, '/')
+  on('session.messages', () => ({
+    value: opts.firstPrompt ? [{ role: 'user', text: '<system-reminder>x</system-reminder>', toolUses: [] }, { role: 'user', text: opts.firstPrompt, toolUses: [] }] : [],
+  }))
   const files = new Map<string, string>(Object.entries(opts.files ?? {}))
   on('fs.exists', (_, e) => ({ value: files.has(k(e.path)) }))
   on('fs.read', (_, e) => {
@@ -212,4 +218,19 @@ test('settings are read from, and saved to, the shared file', async ($, on) => {
   await ui.press({ key: 'backdrop' })
   expect(JSON.parse(files.get(`${ROOT}/prefs.json`) ?? '{}').backdrop).toBe(false)
   await ui.unmount()
+})
+
+test('a session you have read is no longer waiting on you', async ($, on) => {
+  engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({ status: 'seen' }) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock.find({ type: 'Text', text: /read · 12m/ })).toBeDefined()
+  expect(await dock.find({ type: 'Text', text: /waiting on you/ })).toBeUndefined()
+  await dock.unmount()
+})
+
+test('a session open before the mod loaded is labelled by its first prompt', async ($, on) => {
+  const { files } = engine(on, { firstPrompt: 'Fix the  login\nbug' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(JSON.parse(files.get(`${ROOT}/beats/slot-0.json`) ?? '{}').label).toBe('Fix the login bug')
 })
