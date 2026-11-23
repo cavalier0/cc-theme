@@ -113,6 +113,25 @@ export async function readHostRecord($: $, hostId: string): Promise<HostRecord |
   }
 }
 
+// ---------------------------------------------------------------- handled ("waiting on you" cleared)
+
+export async function readAcks($: $): Promise<Record<string, number>> {
+  return (await readJson<Record<string, number>>($, `${await rootOf($)}/acks.json`)) ?? {}
+}
+
+/** Marks these sessions handled as of their current state, in every cockpit; prunes sessions no longer live. */
+export async function ackSessions($: $, done: Beat[], liveIds: string[]): Promise<Record<string, number>> {
+  const cur = await readAcks($)
+  const kept = Object.fromEntries(Object.entries(cur).filter(([k]) => liveIds.includes(k)))
+  const next = { ...kept, ...Object.fromEntries(done.map(b => [b.id, b.since])) }
+  await writeJson($, `${await rootOf($)}/acks.json`, next)
+  return next
+}
+
+/** Whether a session is waiting on you: it finished or asked, and you haven't marked it handled since. */
+export const isWaiting = (b: Beat, acks: Record<string, number>): boolean =>
+  (b.status === 'asking' || b.status === 'waiting') && !(acks[b.id] !== undefined && b.since <= acks[b.id]!)
+
 // ---------------------------------------------------------------- hidden sessions
 
 export async function readHidden($: $): Promise<Record<string, number>> {

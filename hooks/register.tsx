@@ -4,7 +4,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import type { AgentRun, Beat, EnvInfo, EnvKind, Plan, PlanStep, Prefs, SessionStatus, UsageSnap } from '../types'
 import { DEFAULT_COLORS, ENV_LABEL, PRESETS, SCENE, SECTIONS, defaultPrefs, isHex, lookFor, sceneSvg } from './look'
 import { SHELLS, replyWithTables, segmentsOf, shellCard, shellOutOf } from './cards'
-import { hideSession, liveBeats, readHostRecord, prefsStamp, publishBeat, readBeats, readHidden, readPrefs, readSamples, writePrefs, writeSamples } from './shared'
+import { ackSessions, hideSession, isWaiting, liveBeats, readAcks, readHostRecord, prefsStamp, publishBeat, readBeats, readHidden, readPrefs, readSamples, writePrefs, writeSamples } from './shared'
 import { addSample, dur, tokens, windowsOf } from './usage'
 
 type $ = EngineInterface
@@ -23,6 +23,7 @@ const usageA = atom({ plugin: 'cavalier0-theme', key: 'usage' } as const, null, 
 const agentsA = atom({ plugin: 'cavalier0-theme', key: 'agents' } as const, [], { shape: 'agents-1' })
 const planA = atom({ plugin: 'cavalier0-theme', key: 'plan' } as const, null, { shape: 'plan-1' })
 const sessionsA = atom({ plugin: 'cavalier0-theme', key: 'sessions' } as const, [], { shape: 'sessions-1' })
+const acksA = atom({ plugin: 'cavalier0-theme', key: 'acks' } as const, {}, { shape: 'acks-1' })
 const hiddenA = atom({ plugin: 'cavalier0-theme', key: 'hidden' } as const, {}, { shape: 'hidden-1' })
 const meA = atom({ plugin: 'cavalier0-theme', key: 'me' } as const, null, { shape: 'me-1' })
 const viewA = atom({ plugin: 'cavalier0-theme', key: 'view' } as const, 'main')
@@ -151,6 +152,14 @@ const HOST_ID = /^local_[A-Za-z0-9-]{1,64}$/
 /** A session that has sat read or untouched this long goes into the Idle group. */
 const IDLE_MS = 60 * 60_000
 
+/** Marks sessions handled, so they stop counting as waiting on you until they finish again. */
+async function clearWaiting($: $, done: Beat[]) {
+  if (done.length === 0) return
+  const live = (await read($, sessionsA)).map(b => b.id)
+  const acks = await ackSessions($, done, live)
+  await update($, acksA, () => acks)
+}
+
 /** Brings the desktop app to that session, through the app's own deep link. */
 async function openSession($: $, hostId: string) {
   if (!HOST_ID.test(hostId)) return
@@ -224,6 +233,8 @@ const pulse = async ($: $) => {
   const merged = live.some(b => b.id === id) ? live.map(b => (b.id === id ? beat : b)) : [...live, beat]
   const hidden = await readHidden($)
   if (JSON.stringify(hidden) !== JSON.stringify(await read($, hiddenA))) await update($, hiddenA, () => hidden)
+  const acks = await readAcks($)
+  if (JSON.stringify(acks) !== JSON.stringify(await read($, acksA))) await update($, acksA, () => acks)
   const before = await read($, sessionsA)
   if (JSON.stringify(before) !== JSON.stringify(merged)) await update($, sessionsA, () => merged)
 }
@@ -577,7 +588,8 @@ export const register: Register = on => {
     const sessions = (await read($, sessionsA)).filter(b => !(hidden[b.id] !== undefined && b.since <= hidden[b.id]!))
     const usage = await read($, usageA)
     const meId = (await read($, meA)) ? await $.session.id() : ''
-    const waiting = sessions.filter(b => b.id !== meId && (b.status === 'asking' || b.status === 'waiting'))
+    const acks = await read($, acksA)
+    const waiting = sessions.filter(b => b.id !== meId && isWaiting(b, acks))
     const tone = (pct: number | undefined) => (pct === undefined ? undefined : pct >= 90 ? 'error' : pct >= 75 ? 'warning' : undefined)
     const pct = (w: UsageSnap['fiveHour']) => (w ? `${Math.round(w.percent)}%` : '–')
     return (
@@ -586,11 +598,12 @@ export const register: Register = on => {
           {sessions.length > 1
             ? sessions.map(b => (
                 <Text key={`bd-${b.id}`} color={prefs.colors[b.kind] ?? DEFAULT_COLORS[b.kind]}>
-                  {b.id !== meId && (b.status === 'asking' || b.status === 'waiting') ? '◉' : b.status === 'working' ? '●' : '○'}
+                  {b.id !== meId && isWaiting(b, acks) ? '◉' : b.status === 'working' ? '●' : '○'}
                 </Text>
               ))
             : null}
           {waiting.length > 0 ? <Text color="warning">{`${waiting.length} waiting on you`}</Text> : null}
+          {waiting.length > 0 ? <Button key="clear-waiting" plain dimColor label="✓" onPress={() => void clearWaiting($, waiting)} /> : null}
           <Text dimColor>·</Text>
           <Text dimColor={!tone(usage?.fiveHour?.percent)} color={tone(usage?.fiveHour?.percent)}>{`5h ${pct(usage?.fiveHour)}`}</Text>
           <Text dimColor={!tone(usage?.week?.percent)} color={tone(usage?.week?.percent)}>{`wk ${pct(usage?.week)}`}</Text>
@@ -682,7 +695,8 @@ export const register: Register = on => {
     const running = agents.filter(a => a.status === 'running')
 
     // ---- mission control: every live session on this machine
-    const needsYou = (b: Beat) => b.status === 'asking' || b.status === 'waiting'
+    const acks = await read($, acksA)
+    const needsYou = (b: Beat) => isWaiting(b, acks)
     const waiting = sessions.filter(b => b.id !== meId && needsYou(b))
     const colorOfKind = (k: EnvKind) => prefs.colors[k] ?? DEFAULT_COLORS[k]
     const statusOf = (b: Beat): { text: string; color?: string; dim?: boolean } => {
@@ -711,6 +725,7 @@ export const register: Register = on => {
           <Text dimColor size="footnote">
             {waiting.length ? `${waiting.length} waiting on you` : `${sessions.length} sessions`}
           </Text>
+          {waiting.length ? <Button key="clear-waiting" plain dimColor label="✓" onPress={() => void clearWaiting($, waiting)} /> : null}
         </Box>
       ) : null
     const sessionRow = (b: Beat) => {
@@ -734,7 +749,13 @@ export const register: Register = on => {
       return (
         <Box key={`s-${b.id}`} flexDirection="row" gap={1} width="100%">
           <Box flexShrink={0}>
-            <Text color={colorOfKind(b.kind)}>{needsYou(b) && !isMe ? '◉' : '▌'}</Text>
+            {needsYou(b) && !isMe ? (
+              <Button key={`ack-${b.id}`} plain onPress={() => void clearWaiting($, [b])}>
+                <Text color={colorOfKind(b.kind)}>◉</Text>
+              </Button>
+            ) : (
+              <Text color={colorOfKind(b.kind)}>▌</Text>
+            )}
           </Box>
           <Box flexDirection="column" flexShrink={1} flexGrow={1} minWidth={0} overflow="hidden">
             {!isMe && hostId ? (
@@ -928,6 +949,16 @@ export const register: Register = on => {
     }
 
     const finished = agents.filter(a => a.status !== 'running').slice(-5).reverse()
+    const agentsCost = agents.reduce((sum, a) => sum + (a.costUsd ?? 0), 0)
+    const agentsSummary = agents.length
+      ? [
+          running.length ? `${running.length} running` : '',
+          `${agents.length} total`,
+          agents.some(a => a.costUsd !== undefined) ? `~$${agentsCost.toFixed(2)}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')
+      : 'none'
     const steps = plan?.steps ?? []
     const doneCount = steps.filter(s => s.status === 'completed').length
     const idleOpen = prefs.folded.includes('idle:open')
@@ -938,6 +969,11 @@ export const register: Register = on => {
           {header('sessions', 'Sessions', `${sessions.length} live${waiting.length ? ` · ${waiting.length} waiting on you` : ''}`)}
           {!isFolded('sessions') && (
             <Box flexDirection="column" gap={1}>
+              {waiting.length > 0 && (
+                <Button key="clear-waiting" plain onPress={() => void clearWaiting($, waiting)}>
+                  <Text dimColor>{`✓ Mark ${waiting.length === 1 ? 'it' : `all ${waiting.length}`} handled`}</Text>
+                </Button>
+              )}
               {active.map(sessionRow)}
               {idle.length > 0 && (
                 <Button
@@ -969,7 +1005,7 @@ export const register: Register = on => {
       ),
       agents: (
         <Box key="b-agents" flexDirection="column" gap={1}>
-          {header('agents', 'Agents', agents.length ? `${running.length} running · ${agents.length - running.length} finished` : 'none yet')}
+          {header('agents', 'Agents', agentsSummary)}
           {!isFolded('agents') && (
             <Box flexDirection="column" gap={1}>
               {agents.length === 0 && <Text dimColor size="footnote">Subagents show up here with what they're doing.</Text>}

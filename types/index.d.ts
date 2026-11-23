@@ -101,6 +101,8 @@ declare module 'claude-code' {
       sessions: Shaped<Beat[]>
       /** Sessions you cleared from the list, by id: hidden until they do something after this time. */
       hidden: Shaped<Record<string, number>>
+      /** Waiting sessions you marked handled, by id: not waiting on you until they finish another turn. */
+      acks: Shaped<Record<string, number>>
       me: Shaped<Me | null>
       view: 'main' | 'settings'
       now: number

@@ -358,3 +358,42 @@ test('a long title is cut to the pane, so the dismiss button stays in view', asy
   expect(await dock.find({ type: 'Button', key: 'hide-other' } as never)).toBeDefined()
   await dock.unmount()
 })
+
+test('"waiting on you" can be cleared for all, from the band', async ($, on) => {
+  const { files } = engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({}) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const band = await $.ui.mount({ plugin: 'cavalier0-theme', surface: 'desktop', component: 'AbovePrompt', props: { hasSurvey: false } as never })
+  await band.press({ key: 'clear-waiting' })
+  expect(await band.find({ type: 'Text', text: /waiting on you/ })).toBeUndefined()
+  expect(JSON.parse(files.get(`${ROOT}/acks.json`) ?? '{}').other).toBe(NOW - 12 * 60_000)
+  await band.unmount()
+})
+
+test('one session can be marked handled from its row, and waits again after its next turn', async ($, on) => {
+  engine(on, {
+    files: {
+      [`${ROOT}/beats/slot-0.json`]: beat({}),
+      [`${ROOT}/acks.json`]: JSON.stringify({ other: NOW - 30 * 60_000 }),
+    },
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Handled 30m ago, but it finished again 12m ago: waiting again.
+  expect(await dock.find({ type: 'Text', text: /1 waiting on you/ })).toBeDefined()
+  await dock.press({ key: 'ack-other' })
+  expect(await dock.find({ type: 'Text', text: /waiting on you/ })).toBeUndefined()
+  await dock.unmount()
+})
+
+test('the Agents header sums the agents and their cost', async ($, on) => {
+  engine(on)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'ag1' }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock0 = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock0.find({ type: 'Text', text: /^\s*none$/ })).toBeDefined()
+  await dock0.unmount()
+  await $.agent.spawn({ prompt: 'p', description: 'Audit saves', subagentType: 'Explore' } as never)
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock.find({ type: 'Text', text: /1 total/ })).toBeDefined()
+  await dock.unmount()
+})
