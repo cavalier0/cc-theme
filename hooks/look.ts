@@ -27,7 +27,22 @@ export const PRESETS: { label: string; hex: string }[] = [
 
 export const ENV_LABEL: Record<EnvKind, string> = { local: 'LOCAL', cloud: 'CLOUD', worktree: 'WORKTREE' }
 
-export const defaultPrefs = (): Prefs => ({ colors: { ...DEFAULT_COLORS }, sound: true, backdrop: true, folded: [] })
+export const SECTIONS: { id: string; title: string }[] = [
+  { id: 'sessions', title: 'Sessions' },
+  { id: 'usage', title: 'Usage' },
+  { id: 'agents', title: 'Agents' },
+  { id: 'plan', title: 'Plan' },
+]
+
+export const defaultPrefs = (): Prefs => ({ colors: { ...DEFAULT_COLORS }, sound: true, backdrop: true, folded: [], order: SECTIONS.map(s => s.id) })
+
+/** A stored order with any section it lacks added at the end, and any it no longer knows dropped. */
+export const orderOf = (stored: unknown): string[] => {
+  const known = SECTIONS.map(s => s.id)
+  const kept = Array.isArray(stored) ? stored.filter((x): x is string => typeof x === 'string' && known.includes(x)) : []
+  const unique = kept.filter((x, i) => kept.indexOf(x) === i)
+  return [...unique, ...known.filter(x => !unique.includes(x))]
+}
 
 export const isHex = (s: string): boolean => /^#[0-9a-fA-F]{6}$/.test(s)
 

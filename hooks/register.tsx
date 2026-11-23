@@ -1,10 +1,10 @@
 import { atom, memberOf, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { AgentRun, Beat, EnvInfo, EnvKind, Plan, PlanStep, Prefs, SessionStatus, UsageSnap } from '../types'
-import { DEFAULT_COLORS, ENV_LABEL, PRESETS, SCENE, defaultPrefs, isHex, lookFor, sceneSvg } from './look'
+import { DEFAULT_COLORS, ENV_LABEL, PRESETS, SCENE, SECTIONS, defaultPrefs, isHex, lookFor, sceneSvg } from './look'
 import { SHELLS, replyWithTables, segmentsOf, shellCard, shellOutOf } from './cards'
-import { liveBeats, prefsStamp, publishBeat, readBeats, readPrefs, readSamples, writePrefs, writeSamples } from './shared'
+import { hideSession, liveBeats, prefsStamp, publishBeat, readBeats, readHidden, readPrefs, readSamples, writePrefs, writeSamples } from './shared'
 import { addSample, dur, tokens, windowsOf } from './usage'
 
 type $ = EngineInterface
@@ -18,11 +18,12 @@ const STEP_BRIEF =
   `\n\n(Progress: as you work, call ${STEP_TOOL} with done/total steps and a short note so the person can follow along. Optional and silent.)`
 
 const envA = atom({ plugin: 'cavalier0-theme', key: 'env' } as const, null, { shape: 'env-1' })
-const prefsA = atom({ plugin: 'cavalier0-theme', key: 'prefs' } as const, null, { shape: 'prefs-1' })
+const prefsA = atom({ plugin: 'cavalier0-theme', key: 'prefs' } as const, null, { shape: 'prefs-2' })
 const usageA = atom({ plugin: 'cavalier0-theme', key: 'usage' } as const, null, { shape: 'usage-1' })
 const agentsA = atom({ plugin: 'cavalier0-theme', key: 'agents' } as const, [], { shape: 'agents-1' })
 const planA = atom({ plugin: 'cavalier0-theme', key: 'plan' } as const, null, { shape: 'plan-1' })
 const sessionsA = atom({ plugin: 'cavalier0-theme', key: 'sessions' } as const, [], { shape: 'sessions-1' })
+const hiddenA = atom({ plugin: 'cavalier0-theme', key: 'hidden' } as const, {}, { shape: 'hidden-1' })
 const meA = atom({ plugin: 'cavalier0-theme', key: 'me' } as const, null, { shape: 'me-1' })
 const viewA = atom({ plugin: 'cavalier0-theme', key: 'view' } as const, 'main')
 const nowA = atom({ plugin: 'cavalier0-theme', key: 'now' } as const, 0)
@@ -144,6 +145,17 @@ const setStatus = async ($: $, status: SessionStatus) => {
  * you watch is drawn just before it completes: the grace covers that.
  */
 const seen = { at: 0 }
+/** The desktop app's session ids, as its `claude://code/continue?session=` link takes them. */
+const HOST_ID = /^local_[A-Za-z0-9-]{1,64}$/
+/** A session that has sat read or untouched this long goes into the Idle group. */
+const IDLE_MS = 60 * 60_000
+
+/** Brings the desktop app to that session, through the app's own deep link. */
+async function openSession($: $, hostId: string) {
+  if (!HOST_ID.test(hostId)) return
+  // explorer.exe hands a claude:// link to the desktop app; it exits 1 even when it worked.
+  await $.process.run(['explorer.exe', `claude://code/continue?session=${hostId}`]).catch(() => $.ui.toast('Could not switch to that session'))
+}
 const SEEN_GRACE_MS = 3000
 
 let lastBeat = ''
@@ -161,8 +173,10 @@ const pulse = async ($: $) => {
   const steps = plan?.steps ?? []
   const current = steps.find(s => s.status === 'in_progress')
   const id = await $.session.id()
+  const host = await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')
   const beat: Beat = {
     id,
+    ...(host && HOST_ID.test(host) ? { hostId: host } : {}),
     kind: env.kind,
     detail: env.detail,
     label: clip(current?.content ?? me.firstPrompt ?? 'New session', 80),
@@ -186,6 +200,8 @@ const pulse = async ($: $) => {
   const live = liveBeats(await readBeats($), at)
   // This session's own row is drawn from its live state, not from what it last wrote.
   const merged = live.some(b => b.id === id) ? live.map(b => (b.id === id ? beat : b)) : [...live, beat]
+  const hidden = await readHidden($)
+  if (JSON.stringify(hidden) !== JSON.stringify(await read($, hiddenA))) await update($, hiddenA, () => hidden)
   const before = await read($, sessionsA)
   if (JSON.stringify(before) !== JSON.stringify(merged)) await update($, sessionsA, () => merged)
 }
@@ -539,7 +555,8 @@ export const register: Register = on => {
     const agents = await read($, agentsA)
     const plan = await read($, planA)
     const view = await read($, viewA)
-    const sessions = await read($, sessionsA)
+    const hidden = await read($, hiddenA)
+    const sessions = (await read($, sessionsA)).filter(b => !(hidden[b.id] !== undefined && b.since <= hidden[b.id]!))
     const meId = (await read($, meA)) ? await $.session.id() : ''
     const now = (await read($, nowA)) || Date.now()
     const kind: EnvKind = env?.kind ?? 'local'
@@ -631,13 +648,24 @@ export const register: Register = on => {
         b.contextPercent !== undefined ? `ctx ${Math.round(b.contextPercent)}%` : '',
         b.costUsd !== undefined ? `~$${b.costUsd.toFixed(2)}` : '',
       ].filter(Boolean)
+      const title = (
+        <Text bold={!isMe || needsYou(b)} wrap="truncate">
+          {isMe ? `${b.label}  (this session)` : b.label}
+        </Text>
+      )
+      const hostId = b.hostId
+      const live = sessions.map(x => x.id)
       return (
         <Box key={`s-${b.id}`} flexDirection="row" gap={1}>
           <Text color={colorOfKind(b.kind)}>{needsYou(b) && !isMe ? '◉' : '▌'}</Text>
-          <Box flexDirection="column" flexShrink={1}>
-            <Text bold={!isMe || needsYou(b)} wrap="truncate">
-              {isMe ? `${b.label}  (this session)` : b.label}
-            </Text>
+          <Box flexDirection="column" flexShrink={1} flexGrow={1}>
+            {!isMe && hostId ? (
+              <Button key={`go-${b.id}`} plain onPress={() => void openSession($, hostId)}>
+                {title}
+              </Button>
+            ) : (
+              title
+            )}
             <Text size="footnote" color={st.color} dimColor={st.dim}>
               {`${ENV_LABEL[b.kind].toLowerCase()} · ${st.text}`}
             </Text>
@@ -645,10 +673,25 @@ export const register: Register = on => {
               {facts.join(' · ')}
             </Text>
           </Box>
+          <Button
+            key={`hide-${b.id}`}
+            plain
+            dimColor
+            label="✕"
+            onPress={() =>
+              void (async () => {
+                await hideSession($, b.id, b.since, live)
+                await update($, hiddenA, h => ({ ...h, [b.id]: b.since }))
+              })()
+            }
+          />
         </Box>
       )
     }
+    const isIdle = (b: Beat) => b.id !== meId && (b.status === 'seen' || b.status === 'starting') && now - b.since > IDLE_MS
     const order = (list: Beat[]) => [...list.filter(b => needsYou(b) && b.id !== meId), ...list.filter(b => !(needsYou(b) && b.id !== meId))]
+    const active = order(sessions.filter(b => !isIdle(b)))
+    const idle = sessions.filter(isIdle)
 
     if (isWidget && view !== 'settings') {
       return (
@@ -746,6 +789,25 @@ export const register: Register = on => {
             />
           </Box>
           <Text dimColor size="footnote">Sounds play once you turn on the speaker in the session's title bar.</Text>
+          <Text bold>Section order</Text>
+          {prefs.order.map((id, i) => {
+            const move = (to: number) =>
+              void savePrefs($, p => {
+                const o = [...p.order]
+                const [it] = o.splice(i, 1)
+                if (it !== undefined) o.splice(to, 0, it)
+                return { ...p, order: o }
+              })
+            return (
+              <Box key={`ord-${id}`} flexDirection="row" gap={1} alignItems="center">
+                <Box flexGrow={1}>
+                  <Text>{`${i + 1}. ${SECTIONS.find(s => s.id === id)?.title ?? id}`}</Text>
+                </Box>
+                {i > 0 ? <Button key={`up-${id}`} plain label="↑" onPress={() => move(i - 1)} /> : null}
+                {i < prefs.order.length - 1 ? <Button key={`down-${id}`} plain label="↓" onPress={() => move(i + 1)} /> : null}
+              </Box>
+            )
+          })}
         </Box>
       )
     }
@@ -787,6 +849,80 @@ export const register: Register = on => {
     const finished = agents.filter(a => a.status !== 'running').slice(-5).reverse()
     const steps = plan?.steps ?? []
     const doneCount = steps.filter(s => s.status === 'completed').length
+    const idleOpen = prefs.folded.includes('idle:open')
+
+    const blocks: Record<string, RenderChildren> = {
+      sessions: (
+        <Box key="b-sessions" flexDirection="column" gap={1}>
+          {header('sessions', 'Sessions', `${sessions.length} live${waiting.length ? ` · ${waiting.length} waiting on you` : ''}`)}
+          {!isFolded('sessions') && (
+            <Box flexDirection="column" gap={1}>
+              {active.map(sessionRow)}
+              {idle.length > 0 && (
+                <Button
+                  key="idle-toggle"
+                  plain
+                  onPress={() => void savePrefs($, p => ({ ...p, folded: idleOpen ? p.folded.filter(x => x !== 'idle:open') : [...p.folded, 'idle:open'] }))}
+                >
+                  <Text dimColor>{`${idleOpen ? '▾' : '▸'} Idle · ${idle.length}`}</Text>
+                </Button>
+              )}
+              {idleOpen && idle.map(sessionRow)}
+              {sessions.length <= 1 && <Text dimColor size="footnote">Other sessions on this PC show up here once they run this mod.</Text>}
+            </Box>
+          )}
+        </Box>
+      ),
+      usage: (
+        <Box key="b-usage" flexDirection="column" gap={1}>
+          {header('usage', 'Usage', usage?.model)}
+          {!isFolded('usage') && (
+            <Box flexDirection="column" gap={1}>
+              {windowRow('5h', '5-hour', usage?.fiveHour)}
+              {windowRow('wk', 'Weekly', usage?.week)}
+              {contextRow}
+              {usage?.costUsd !== undefined && <Text dimColor size="footnote">{`This session ≈ $${usage.costUsd.toFixed(2)} at API prices`}</Text>}
+            </Box>
+          )}
+        </Box>
+      ),
+      agents: (
+        <Box key="b-agents" flexDirection="column" gap={1}>
+          {header('agents', 'Agents', agents.length ? `${running.length} running · ${agents.length - running.length} finished` : 'none yet')}
+          {!isFolded('agents') && (
+            <Box flexDirection="column" gap={1}>
+              {agents.length === 0 && <Text dimColor size="footnote">Subagents show up here with what they're doing.</Text>}
+              {running.map(agentCard)}
+              {finished.map(agentCard)}
+            </Box>
+          )}
+        </Box>
+      ),
+      plan: (
+        <Box key="b-plan" flexDirection="column" gap={1}>
+          {header('plan', 'Plan', steps.length ? `${doneCount}/${steps.length}` : 'none yet')}
+          {!isFolded('plan') && (
+            <Box flexDirection="column">
+              {steps.length === 0 && <Text dimColor size="footnote">The current plan's steps show up here.</Text>}
+              {steps.map((s, i) => {
+                const took = s.startedAt ? dur(((s.endedAt ?? now) - s.startedAt) / 60_000) : ''
+                return (
+                  <Box key={`p-${i}`} flexDirection="row" gap={1}>
+                    <Text color={s.status === 'completed' ? 'success' : s.status === 'in_progress' ? accent : undefined} dimColor={s.status === 'pending'}>
+                      {s.status === 'completed' ? '✓' : s.status === 'in_progress' ? '▸' : '○'}
+                    </Text>
+                    <Text bold={s.status === 'in_progress'} dimColor={s.status === 'completed'}>
+                      {s.content}
+                    </Text>
+                    {took && s.status !== 'pending' ? <Text dimColor size="footnote">{took}</Text> : null}
+                  </Box>
+                )
+              })}
+            </Box>
+          )}
+        </Box>
+      ),
+    }
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -795,53 +931,7 @@ export const register: Register = on => {
           <Button key="settings" label="Settings" onPress={() => void update($, viewA, () => 'settings')} />
         </Box>
 
-        {header('sessions', 'Sessions', `${sessions.length} live${waiting.length ? ` · ${waiting.length} waiting on you` : ''}`)}
-        {!isFolded('sessions') && (
-          <Box flexDirection="column" gap={1}>
-            {order(sessions).map(sessionRow)}
-            {sessions.length <= 1 && <Text dimColor size="footnote">Other sessions on this PC show up here once they run this mod.</Text>}
-          </Box>
-        )}
-
-        {header('usage', 'Usage', usage?.model)}
-        {!isFolded('usage') && (
-          <Box flexDirection="column" gap={1}>
-            {windowRow('5h', '5-hour', usage?.fiveHour)}
-            {windowRow('wk', 'Weekly', usage?.week)}
-            {contextRow}
-            {usage?.costUsd !== undefined && <Text dimColor size="footnote">{`This session ≈ $${usage.costUsd.toFixed(2)} at API prices`}</Text>}
-          </Box>
-        )}
-
-        {header('agents', 'Agents', agents.length ? `${running.length} running · ${agents.length - running.length} finished` : 'none yet')}
-        {!isFolded('agents') && (
-          <Box flexDirection="column" gap={1}>
-            {agents.length === 0 && <Text dimColor size="footnote">Subagents show up here with what they're doing.</Text>}
-            {running.map(agentCard)}
-            {finished.map(agentCard)}
-          </Box>
-        )}
-
-        {header('plan', 'Plan', steps.length ? `${doneCount}/${steps.length}` : 'none yet')}
-        {!isFolded('plan') && (
-          <Box flexDirection="column">
-            {steps.length === 0 && <Text dimColor size="footnote">The current plan's steps show up here.</Text>}
-            {steps.map((s, i) => {
-              const took = s.startedAt ? dur(((s.endedAt ?? now) - s.startedAt) / 60_000) : ''
-              return (
-                <Box key={`s-${i}`} flexDirection="row" gap={1}>
-                  <Text color={s.status === 'completed' ? 'success' : s.status === 'in_progress' ? accent : undefined} dimColor={s.status === 'pending'}>
-                    {s.status === 'completed' ? '✓' : s.status === 'in_progress' ? '▸' : '○'}
-                  </Text>
-                  <Text bold={s.status === 'in_progress'} dimColor={s.status === 'completed'} strikethrough={false}>
-                    {s.content}
-                  </Text>
-                  {took && s.status !== 'pending' ? <Text dimColor size="footnote">{took}</Text> : null}
-                </Box>
-              )
-            })}
-          </Box>
-        )}
+        {prefs.order.map(id => blocks[id] ?? null)}
       </Box>
     )
   })

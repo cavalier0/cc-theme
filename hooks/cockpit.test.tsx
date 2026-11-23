@@ -234,3 +234,48 @@ test('a session open before the mod loaded is labelled by its first prompt', asy
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   expect(JSON.parse(files.get(`${ROOT}/beats/slot-0.json`) ?? '{}').label).toBe('Fix the login bug')
 })
+
+test('clicking another session opens it in the desktop app', async ($, on) => {
+  const runs: string[][] = []
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    return { value: { exitCode: 1, stdout: '', stderr: '' } as never }
+  })
+  engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({ hostId: 'local_abc-123' }) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await dock.press({ key: 'go-other' })
+  expect(runs).toEqual([['explorer.exe', 'claude://code/continue?session=local_abc-123']])
+  await dock.unmount()
+})
+
+test('a cleared session stays hidden until it does something new', async ($, on) => {
+  const { files } = engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({}) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await dock.press({ key: 'hide-other' })
+  expect(await dock.find({ type: 'Text', text: 'Wire the save system' })).toBeUndefined()
+  expect(JSON.parse(files.get(`${ROOT}/hidden.json`) ?? '{}').other).toBe(NOW - 12 * 60_000)
+  await dock.unmount()
+})
+
+test('long-idle sessions fold into an Idle group', async ($, on) => {
+  engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({ status: 'seen', since: NOW - 3 * 3600_000 }) } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock.find({ type: 'Text', text: /Idle · 1/ })).toBeDefined()
+  expect(await dock.find({ type: 'Text', text: 'Wire the save system' })).toBeUndefined()
+  await dock.press({ key: 'idle-toggle' })
+  expect(await dock.find({ type: 'Text', text: 'Wire the save system' })).toBeDefined()
+  await dock.unmount()
+})
+
+test('sections can be reordered in settings', async ($, on) => {
+  const { files } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'settings' })
+  await ui.press({ key: 'down-sessions' })
+  expect(JSON.parse(files.get(`${ROOT}/prefs.json`) ?? '{}').order).toEqual(['usage', 'sessions', 'agents', 'plan'])
+  await ui.unmount()
+})

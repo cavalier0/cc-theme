@@ -12,6 +12,8 @@ export type Prefs = {
   backdrop: boolean
   /** Sections of the cockpit folded shut. */
   folded: string[]
+  /** The cockpit's sections, top to bottom. */
+  order: string[]
 }
 
 export type Window = {
@@ -62,6 +64,8 @@ export type SessionStatus = 'starting' | 'working' | 'asking' | 'waiting' | 'see
 /** One live session's heartbeat, shared with every other session on this machine. */
 export type Beat = {
   id: string
+  /** The desktop app's own id for the session (`local_…`), which a deep link opens. */
+  hostId?: string
   kind: EnvKind
   detail: string
   /** What the session is about: its plan's current step, else its first prompt. */
@@ -91,6 +95,8 @@ declare module 'claude-code' {
       plan: Shaped<Plan | null>
       /** Every live session on this machine, this one included. */
       sessions: Shaped<Beat[]>
+      /** Sessions you cleared from the list, by id: hidden until they do something after this time. */
+      hidden: Shaped<Record<string, number>>
       me: Shaped<Me | null>
       view: 'main' | 'settings'
       now: number

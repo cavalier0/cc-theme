@@ -7,7 +7,7 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { Beat, Prefs } from '../types'
-import { defaultPrefs } from './look'
+import { defaultPrefs, orderOf } from './look'
 import type { Sample } from './usage'
 
 type $ = EngineInterface
@@ -47,6 +47,7 @@ export const normalPrefs = (stored: Partial<Prefs> | undefined): Prefs => {
     sound: stored?.sound ?? d.sound,
     backdrop: stored?.backdrop ?? d.backdrop,
     folded: Array.isArray(stored?.folded) ? stored.folded : [],
+    order: orderOf(stored?.order),
   }
 }
 
@@ -77,6 +78,19 @@ export async function readSamples($: $): Promise<Sample[]> {
 }
 export async function writeSamples($: $, s: Sample[]) {
   return writeJson($, `${await rootOf($)}/samples.json`, s)
+}
+
+// ---------------------------------------------------------------- hidden sessions
+
+export async function readHidden($: $): Promise<Record<string, number>> {
+  return (await readJson<Record<string, number>>($, `${await rootOf($)}/hidden.json`)) ?? {}
+}
+
+/** Hides a session from every cockpit until it does something after `since`; prunes sessions no longer live. */
+export async function hideSession($: $, id: string, since: number, liveIds: string[]) {
+  const cur = await readHidden($)
+  const kept = Object.fromEntries(Object.entries(cur).filter(([k]) => liveIds.includes(k)))
+  await writeJson($, `${await rootOf($)}/hidden.json`, { ...kept, [id]: since })
 }
 
 // ---------------------------------------------------------------- beats

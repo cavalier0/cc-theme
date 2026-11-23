@@ -5,7 +5,8 @@ A Claude Code mod for the desktop and mobile apps: one calm dark theme, tinted b
 ## What it does
 
 - **Theme by environment.** Local sessions are teal, cloud sessions violet, git worktrees amber. Detected at session start. Change any colour in the cockpit's Settings; it is saved on that machine for every later session.
-- **Cockpit pane.** Opens in every session as a small widget and expands when subagents or a plan appear (`/cockpit` opens it, `/cockpit settings` jumps to settings).
+- **Cockpit pane.** Opens in every session as a small widget and expands when subagents or a plan appear (`/cockpit` opens it, `/cockpit settings` jumps to settings). Reorder its sections in Settings.
+  - **Sessions (mission control):** every live session on this PC, in its environment colour, with what it's doing. Sessions waiting on you come first, marked ◉, and turn to "read" once you've looked at the reply. Click a session to switch to it in the desktop app; ✕ clears one until it does something new; sessions idle over an hour fold into an Idle group.
   - **Usage:** 5-hour and weekly limits with reset countdowns and a pace forecast ("at this pace: full in 1h20, before it resets"), context fill, and the session's estimated cost at API prices.
   - **Agents:** each subagent's task, what it is doing right now, steps done, model, elapsed time, tokens and cost.
   - **Plan:** the session's plan steps with their state and how long each took.
