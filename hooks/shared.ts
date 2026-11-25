@@ -85,20 +85,48 @@ export async function writeSamples($: $, s: Sample[]) {
 
 export type HostRecord = { title?: string; isArchived: boolean; lastFocusedAt?: number }
 
+/** Where this session's record was found, once found. */
+let recordPathCache: string | undefined
+
+/**
+ * Finds the desktop app's record of this session. The app keeps it under its data folder,
+ * `<LOCALAPPDATA>/Claude-Data/claude_<…>/claude-code-sessions/<account>/<org>/<id>.json`.
+ * Inside the app the engine's own environment has no CLAUDE_CODE_EXECPATH (the app sets it
+ * only for the commands Claude runs), so the data folder is also looked for directly.
+ */
+export async function hostRecordPath($: $, hostId: string): Promise<string | undefined> {
+  if (recordPathCache) return recordPathCache
+  const account = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
+  const org = await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID')
+  if (!account || !org) return undefined
+  const tail = `claude-code-sessions/${account}/${org}/${hostId}.json`
+  const bases: string[] = []
+  const exec = (await $.env.get('CLAUDE_CODE_EXECPATH'))?.replace(/\\/g, '/')
+  const at = exec ? exec.toLowerCase().lastIndexOf('/claude-code/') : -1
+  if (exec && at >= 0) bases.push(exec.slice(0, at))
+  const local = (await $.env.get('LOCALAPPDATA'))?.replace(/\\/g, '/')
+  if (local) {
+    const entries = await $.fs.list(`${local}/Claude-Data`).catch(() => [])
+    for (const entry of entries) if (entry.kind === 'dir' && entry.name.startsWith('claude_')) bases.push(`${local}/Claude-Data/${entry.name}`)
+  }
+  for (const base of bases) {
+    const path = `${base}/${tail}`
+    if (await $.fs.exists(path).catch(() => false)) {
+      recordPathCache = path
+      return path
+    }
+  }
+  return undefined
+}
+
 /**
  * Reads the desktop app's own record of this session: its sidebar title, whether it is
  * archived, and when you last had it open. Only the head of the file is read, where the
  * app writes those fields. Undefined outside the desktop app or if the app moves it.
  */
 export async function readHostRecord($: $, hostId: string): Promise<HostRecord | undefined> {
-  const exec = await $.env.get('CLAUDE_CODE_EXECPATH')
-  const account = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID')
-  const org = await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID')
-  if (!exec || !account || !org) return undefined
-  const norm = exec.replace(/\\/g, '/')
-  const at = norm.toLowerCase().lastIndexOf('/claude-code/')
-  if (at < 0) return undefined
-  const path = `${norm.slice(0, at)}/claude-code-sessions/${account}/${org}/${hostId}.json`
+  const path = await hostRecordPath($, hostId)
+  if (!path) return undefined
   try {
     const head = String(await $.fs.read(path, { offset: 0, length: 4096 }))
     const title = /"title":"((?:[^"\\]|\\.)*)"/.exec(head)?.[1]

@@ -26,6 +26,12 @@ const engine = (
   }))
   const files = new Map<string, string>(Object.entries(opts.files ?? {}))
   on('fs.exists', (_, e) => ({ value: files.has(k(e.path)) }))
+  on('fs.list', (_, e) => {
+    // The directories directly under a path, from the fake files' paths.
+    const dir = k(e.path).replace(/\/+$/, '') + '/'
+    const names = new Set([...files.keys()].filter(p => p.startsWith(dir)).map(p => p.slice(dir.length).split('/')[0]!))
+    return { value: [...names].map(name => ({ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false })) as never }
+  })
   on('fs.read', (_, e) => {
     const text = files.get(k(e.path))
     if (text === undefined) throw new Error('missing')
@@ -430,4 +436,19 @@ test('the header shows the git branch beside the folder', async ($, on) => {
   const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await dock.find({ type: 'Text', text: 'app · main' })).toBeDefined()
   await dock.unmount()
+})
+
+test('inside the desktop app, where CLAUDE_CODE_EXECPATH is unset, the record is found under LOCALAPPDATA', async ($, on) => {
+  const appRecord = 'C:/Users/me/AppData/Local/Claude-Data/claude_x/claude-code-sessions/acc/org/local_me.json'
+  const { files } = engine(on, {
+    env: {
+      CLAUDE_CODE_HOST_SESSION_ID: 'local_me',
+      CLAUDE_CODE_ACCOUNT_UUID: 'acc',
+      CLAUDE_CODE_ORGANIZATION_UUID: 'org',
+      LOCALAPPDATA: 'C:/Users/me/AppData/Local',
+    },
+    files: { [appRecord]: record({ title: 'Cut harness release v1.0.3' }) },
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  expect(JSON.parse(files.get(`${ROOT}/beats/slot-0.json`) ?? '{}').label).toBe('Cut harness release v1.0.3')
 })
