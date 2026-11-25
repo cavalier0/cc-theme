@@ -1,5 +1,5 @@
 {
   "name": "cc-theme",
   "owner": { "name": "cavalier0" },
-  "plugins": [{ "name": "cavalier0-theme", "source": "./" }]
+  "plugins": [{ "name": "cavalier0-theme", "source": "./", "version": "0.1.6" }]
 }

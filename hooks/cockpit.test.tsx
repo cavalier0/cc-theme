@@ -18,7 +18,7 @@ const NOW = Date.UTC(2029, 11, 31, 20)
 
 const engine = (
   on: On,
-  opts: { remote?: boolean; cwd?: string; repoRoot?: string | null; files?: Record<string, string>; firstPrompt?: string; env?: Record<string, string> } = {},
+  opts: { remote?: boolean; cwd?: string; repoRoot?: string | null; files?: Record<string, string>; firstPrompt?: string; env?: Record<string, string>; tools?: Record<string, unknown>; git?: string } = {},
 ) => {
   const k = (p: string) => p.replace(/\\/g, '/')
   on('session.messages', () => ({
@@ -90,8 +90,17 @@ const engine = (
   })
   on('agent.list', () => ({ value: [] }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.call', () => ({ result: {} }))
-  return { themes, opened, logs, files, panes }
+  const called: { tool: string; input: unknown }[] = []
+  on('tool.call', (_, e) => {
+    called.push({ tool: String(e.tool), input: e })
+    return { result: (opts.tools?.[String(e.tool)] ?? {}) as never }
+  })
+  const runs: string[][] = []
+  on('process.run', (_, e) => {
+    runs.push([...e.argv])
+    return { value: { exitCode: opts.git && e.argv[0] === 'git' ? 0 : 1, stdout: opts.git ?? '', stderr: '' } as never }
+  })
+  return { themes, opened, logs, files, panes, called, runs }
 }
 
 test('a cloud session gets the violet look and the widget shows CLOUD', async ($, on) => {
@@ -240,16 +249,11 @@ test('a session open before the mod loaded is labelled by its first prompt', asy
 })
 
 test('clicking another session opens it in the desktop app', async ($, on) => {
-  const runs: string[][] = []
-  on('process.run', (_, e) => {
-    runs.push([...e.argv])
-    return { value: { exitCode: 1, stdout: '', stderr: '' } as never }
-  })
-  engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({ hostId: 'local_abc-123' }) } })
+  const { runs } = engine(on, { files: { [`${ROOT}/beats/slot-0.json`]: beat({ hostId: 'local_abc-123' }) } })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await dock.press({ key: 'go-other' })
-  expect(runs).toEqual([['explorer.exe', 'claude://code/continue?session=local_abc-123']])
+  expect(runs.filter(r => r[0] === 'explorer.exe')).toEqual([['explorer.exe', 'claude://code/continue?session=local_abc-123']])
   await dock.unmount()
 })
 
@@ -280,7 +284,7 @@ test('sections can be reordered in settings', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'settings' })
   await ui.press({ key: 'down-sessions' })
-  expect(JSON.parse(files.get(`${ROOT}/prefs.json`) ?? '{}').order).toEqual(['usage', 'sessions', 'agents', 'plan'])
+  expect(JSON.parse(files.get(`${ROOT}/prefs.json`) ?? '{}').order).toEqual(['usage', 'sessions', 'agents', 'tasks', 'plan'])
   await ui.unmount()
 })
 
@@ -395,5 +399,35 @@ test('the Agents header sums the agents and their cost', async ($, on) => {
   await $.agent.spawn({ prompt: 'p', description: 'Audit saves', subagentType: 'Explore' } as never)
   const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await dock.find({ type: 'Text', text: /1 total/ })).toBeDefined()
+  await dock.unmount()
+})
+
+test('a command left running in the background is listed, and can be stopped', async ($, on) => {
+  const { called } = engine(on, { tools: { Bash: { stdout: '', stderr: '', backgroundTaskId: 'bg1' } } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'make test', description: 'Run the full suite', run_in_background: true } as never)
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock.find({ type: 'Text', text: 'Run the full suite' })).toBeDefined()
+  expect(await dock.find({ type: 'Text', text: /1 running/ })).toBeDefined()
+  await dock.press({ key: 'stop-bg1' })
+  expect(called.some(c => c.tool === 'TaskStop' && (c.input as { task_id?: string }).task_id === 'bg1')).toBe(true)
+  expect(await dock.find({ type: 'Text', text: /command · stopped/ })).toBeDefined()
+  await dock.unmount()
+})
+
+test('a watcher is listed until its deadline', async ($, on) => {
+  engine(on, { tools: { Monitor: { taskId: 'm1', timeoutMs: 600_000 } } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Monitor', description: 'Wait for release build to finish', timeout_ms: 600_000 } as never)
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock.find({ type: 'Text', text: /watcher · running/ })).toBeDefined()
+  await dock.unmount()
+})
+
+test('the header shows the git branch beside the folder', async ($, on) => {
+  engine(on, { git: 'main\n' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const dock = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await dock.find({ type: 'Text', text: 'app · main' })).toBeDefined()
   await dock.unmount()
 })

@@ -31,6 +31,7 @@ export const SECTIONS: { id: string; title: string }[] = [
   { id: 'sessions', title: 'Sessions' },
   { id: 'usage', title: 'Usage' },
   { id: 'agents', title: 'Agents' },
+  { id: 'tasks', title: 'Background' },
   { id: 'plan', title: 'Plan' },
 ]
 

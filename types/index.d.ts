@@ -4,6 +4,20 @@ export type EnvInfo = {
   kind: EnvKind
   /** A short place name: the folder, the worktree or the cloud repo. */
   detail: string
+  /** The git branch checked out, when the folder is a repository. */
+  branch?: string
+}
+
+/** A command or watcher left running in the background. */
+export type BgTask = {
+  id: string
+  kind: 'shell' | 'monitor'
+  label: string
+  startedAt: number
+  /** A watcher's own deadline, when it has one. */
+  deadline?: number
+  status: 'running' | 'done' | 'failed' | 'stopped'
+  endedAt?: number
 }
 
 export type Prefs = {
@@ -96,6 +110,7 @@ declare module 'claude-code' {
       prefs: Shaped<Prefs | null>
       usage: Shaped<UsageSnap | null>
       agents: Shaped<AgentRun[]>
+      tasks: Shaped<BgTask[]>
       plan: Shaped<Plan | null>
       /** Every live session on this machine, this one included. */
       sessions: Shaped<Beat[]>

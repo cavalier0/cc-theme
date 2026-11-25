@@ -1,7 +1,7 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentRun, Beat, EnvInfo, EnvKind, Plan, PlanStep, Prefs, SessionStatus, UsageSnap } from '../types'
+import type { AgentRun, BgTask, Beat, EnvInfo, EnvKind, Plan, PlanStep, Prefs, SessionStatus, UsageSnap } from '../types'
 import { DEFAULT_COLORS, ENV_LABEL, PRESETS, SCENE, SECTIONS, defaultPrefs, isHex, lookFor, sceneSvg } from './look'
 import { SHELLS, replyWithTables, segmentsOf, shellCard, shellOutOf } from './cards'
 import { ackSessions, hideSession, isWaiting, liveBeats, readAcks, readHostRecord, prefsStamp, publishBeat, readBeats, readHidden, readPrefs, readSamples, writePrefs, writeSamples } from './shared'
@@ -20,6 +20,7 @@ const STEP_BRIEF =
 const envA = atom({ plugin: 'cavalier0-theme', key: 'env' } as const, null, { shape: 'env-1' })
 const prefsA = atom({ plugin: 'cavalier0-theme', key: 'prefs' } as const, null, { shape: 'prefs-3' })
 const usageA = atom({ plugin: 'cavalier0-theme', key: 'usage' } as const, null, { shape: 'usage-1' })
+const tasksA = atom({ plugin: 'cavalier0-theme', key: 'tasks' } as const, [], { shape: 'tasks-1' })
 const agentsA = atom({ plugin: 'cavalier0-theme', key: 'agents' } as const, [], { shape: 'agents-1' })
 const planA = atom({ plugin: 'cavalier0-theme', key: 'plan' } as const, null, { shape: 'plan-1' })
 const sessionsA = atom({ plugin: 'cavalier0-theme', key: 'sessions' } as const, [], { shape: 'sessions-1' })
@@ -151,6 +152,63 @@ const seen = { at: 0 }
 const HOST_ID = /^local_[A-Za-z0-9-]{1,64}$/
 /** A session that has sat read or untouched this long goes into the Idle group. */
 const IDLE_MS = 60 * 60_000
+
+/** The branch checked out in the session's folder, or undefined outside a repository. */
+async function branchOf($: $): Promise<string | undefined> {
+  const cwd = await $.session.cwd()
+  const r = await $.process.run(['git', '-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD']).catch(() => undefined)
+  const name = r && r.exitCode === 0 ? String(r.stdout).trim() : ''
+  return name && name !== 'HEAD' ? name : undefined
+}
+
+/** Task notices seen while drawing (a drawing may not write state); the heartbeat applies them. */
+const endedTasks = new Map<string, BgTask['status']>()
+/** A background task we never hear back about is dropped after this long. */
+const TASK_MAX_MS = 6 * 3600_000
+
+async function settleTasks($: $) {
+  const at = await $.clock.now()
+  const list = await read($, tasksA)
+  if (!list.some(t => t.status === 'running')) return
+  const next = list.map(t => {
+    if (t.status !== 'running') return t
+    const ended = endedTasks.get(t.id)
+    if (ended) return { ...t, status: ended, endedAt: at }
+    if ((t.deadline && at > t.deadline + 60_000) || at - t.startedAt > TASK_MAX_MS) return { ...t, status: 'done' as const, endedAt: at }
+    return t
+  })
+  if (JSON.stringify(next) !== JSON.stringify(list)) await update($, tasksA, () => next)
+}
+
+async function stopTask($: $, id: string) {
+  try {
+    await $.tool.call({ tool: 'TaskStop', task_id: id } as never)
+    const at = await $.clock.now()
+    await update($, tasksA, list => list.map(t => (t.id === id ? { ...t, status: 'stopped' as const, endedAt: at } : t)))
+  } catch {
+    $.ui.toast('Could not stop that task')
+  }
+}
+
+/** Records a command or watcher the main loop left running, from its call and its result. */
+async function recordBackground($: $, tool: string, input: Record<string, unknown>, result: unknown) {
+  const isMonitor = tool === 'Monitor'
+  if (!isMonitor && input.run_in_background !== true) return
+  const out = (result ?? {}) as Record<string, unknown>
+  const id = str(out.backgroundTaskId) ?? str(out.taskId)
+  if (!id) return
+  const at = await $.clock.now()
+  const timeout = typeof out.timeoutMs === 'number' && out.timeoutMs > 0 ? out.timeoutMs : undefined
+  const task: BgTask = {
+    id,
+    kind: isMonitor ? 'monitor' : 'shell',
+    label: clip(str(input.description) ?? str(input.command) ?? tool, 80),
+    startedAt: at,
+    ...(timeout ? { deadline: at + timeout } : {}),
+    status: 'running',
+  }
+  await update($, tasksA, list => [...list.filter(t => t.id !== id), task].slice(-30))
+}
 
 /** Marks sessions handled, so they stop counting as waiting on you until they finish again. */
 async function clearWaiting($: $, done: Beat[]) {
@@ -359,6 +417,8 @@ export const register: Register = on => {
     const prefs = await readPrefs($)
     prefsSeen = await prefsStamp($)
     await update($, envA, () => env)
+    const branch = await branchOf($).catch(() => undefined)
+    if (branch) await update($, envA, en => (en ? { ...en, branch } : en))
     await update($, prefsA, () => prefs)
     await applyLook($)
 
@@ -412,6 +472,11 @@ export const register: Register = on => {
           await setStatus($, 'seen')
           await pulse($).catch(() => undefined)
         }
+        if (ticks % 30 === 0) {
+          const branch = await branchOf($).catch(() => undefined)
+          await update($, envA, en => (en && en.branch !== branch ? { ...en, branch } : en))
+        }
+        if (ticks % 3 === 0) await settleTasks($).catch(() => undefined)
         if (ticks % 5 === 0) {
           await pulse($).catch(() => undefined)
           await followPrefs($).catch(() => undefined)
@@ -456,6 +521,40 @@ export const register: Register = on => {
     await update($, nowA, () => at)
     await expand($)
     return started
+  })
+
+  // ---- background commands and watchers
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (!e.agentId) await recordBackground($, 'Bash', e as unknown as Record<string, unknown>, ran.result).catch(() => undefined)
+    return ran
+  })
+  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (!e.agentId) await recordBackground($, 'PowerShell', e as unknown as Record<string, unknown>, ran.result).catch(() => undefined)
+    return ran
+  })
+  on('tool.call', { tool: 'Monitor' }, async ($, e, next) => {
+    const ran = await next(e)
+    if (!e.agentId) await recordBackground($, 'Monitor', e as unknown as Record<string, unknown>, ran.result).catch(() => undefined)
+    return ran
+  })
+
+  on('tool.call', { tool: 'TaskStop' }, async ($, e, next) => {
+    const ran = await next(e)
+    const input = e as unknown as Record<string, unknown>
+    const id = str(input.task_id) ?? str(input.shell_id)
+    if (id) endedTasks.set(id, 'stopped')
+    return ran
+  }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
+    const task = e.props.task
+    if (e.props.origin.kind === 'task-notification' && task?.id) {
+      const s = String(task.status ?? '')
+      endedTasks.set(task.id, s === 'failed' ? 'failed' : s === 'killed' ? 'stopped' : 'done')
+    }
+    return next(e)
   })
 
   on('tool.call', { tool: STEP_TOOL }, async ($, e) => {
@@ -657,7 +756,7 @@ export const register: Register = on => {
         <Text backgroundColor={accent} color="#101010" bold>
           {` ${ENV_LABEL[kind]} `}
         </Text>
-        {env?.detail ? <Text dimColor wrap="truncate">{env.detail}</Text> : null}
+        {env?.detail ? <Text dimColor wrap="truncate">{env.branch ? `${env.detail} · ${env.branch}` : env.detail}</Text> : null}
       </Box>
     )
 
@@ -948,6 +1047,31 @@ export const register: Register = on => {
       )
     }
 
+    const tasks = await read($, tasksA)
+    const liveTasks = tasks.filter(t => t.status === 'running')
+    const pastTasks = tasks.filter(t => t.status !== 'running').slice(-3).reverse()
+    const taskRow = (t: BgTask) => {
+      const isLive = t.status === 'running'
+      const took = dur(((t.endedAt ?? now) - t.startedAt) / 60_000)
+      const mark = isLive ? '●' : t.status === 'done' ? '✓' : t.status === 'failed' ? '✕' : '■'
+      const markColor = isLive ? accent : t.status === 'done' ? 'success' : t.status === 'failed' ? 'error' : undefined
+      return (
+        <Box key={`t-${t.id}`} flexDirection="row" gap={1} width="100%">
+          <Box flexShrink={0}>
+            <Text color={markColor} dimColor={!isLive && t.status === 'stopped'}>{mark}</Text>
+          </Box>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+            <Text dimColor={!isLive} wrap="truncate-end">{clip(t.label, Math.max(12, (e.props.bodyColumns ?? 40) - 12))}</Text>
+            <Text size="footnote" dimColor>{`${t.kind === 'monitor' ? 'watcher' : 'command'} · ${isLive ? 'running' : t.status} · ${took}`}</Text>
+          </Box>
+          {isLive ? (
+            <Box flexShrink={0}>
+              <Button key={`stop-${t.id}`} plain dimColor label="■ Stop" onPress={() => void stopTask($, t.id)} />
+            </Box>
+          ) : null}
+        </Box>
+      )
+    }
     const finished = agents.filter(a => a.status !== 'running').slice(-5).reverse()
     const agentsCost = agents.reduce((sum, a) => sum + (a.costUsd ?? 0), 0)
     const agentsSummary = agents.length
@@ -1011,6 +1135,18 @@ export const register: Register = on => {
               {agents.length === 0 && <Text dimColor size="footnote">Subagents show up here with what they're doing.</Text>}
               {running.map(agentCard)}
               {finished.map(agentCard)}
+            </Box>
+          )}
+        </Box>
+      ),
+      tasks: (
+        <Box key="b-tasks" flexDirection="column" gap={1}>
+          {header('tasks', 'Background', liveTasks.length ? `${liveTasks.length} running` : 'none')}
+          {!isFolded('tasks') && (
+            <Box flexDirection="column" gap={1}>
+              {tasks.length === 0 && <Text dimColor size="footnote">Commands and watchers left running in the background show up here.</Text>}
+              {liveTasks.map(taskRow)}
+              {pastTasks.map(taskRow)}
             </Box>
           )}
         </Box>
